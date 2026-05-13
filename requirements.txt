@@ -1,0 +1,8 @@
+numpy
+pandas
+pillow
+scipy
+torch
+torchvision
+tqdm
+pyyaml
