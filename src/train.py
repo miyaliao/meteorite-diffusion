@@ -143,6 +143,30 @@ def save_checkpoint(
     )
 
 
+def save_ema_checkpoint(
+    checkpoint_path: Path,
+    ema_model: "EMAModel",
+    optimizer: Adam,
+    epoch: int,
+    config: dict,
+    timesteps: int,
+    ema_decay: float,
+) -> None:
+    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(
+        {
+            "epoch": epoch,
+            "model_state_dict": ema_model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "config": config,
+            "timesteps": timesteps,
+            "ema": True,
+            "ema_decay": ema_decay,
+        },
+        checkpoint_path,
+    )
+
+
 class EMAModel:
     def __init__(self, model: nn.Module, decay: float) -> None:
         self.decay = decay
@@ -353,17 +377,14 @@ def main() -> None:
                 except Exception:
                     pass
                 if ema_model is not None:
-                    torch.save(
-                        {
-                            "epoch": epoch,
-                            "model_state_dict": ema_model.state_dict(),
-                            "optimizer_state_dict": optimizer.state_dict(),
-                            "config": config,
-                            "timesteps": diffusion_timesteps,
-                            "ema": True,
-                            "ema_decay": ema_decay,
-                        },
-                        run_checkpoint_dir / f"ddpm_ema_step_{global_step:07d}.pt",
+                    save_ema_checkpoint(
+                        checkpoint_path=run_checkpoint_dir / f"ddpm_ema_step_{global_step:07d}.pt",
+                        ema_model=ema_model,
+                        optimizer=optimizer,
+                        epoch=epoch,
+                        config=config,
+                        timesteps=diffusion_timesteps,
+                        ema_decay=ema_decay,
                     )
                 print(f"Saved step checkpoint at global_step={global_step}")
 
@@ -397,6 +418,20 @@ def main() -> None:
                 shutil.copy2(checkpoint_path, base_latest_path)
             except Exception:
                 pass
+            if ema_model is not None:
+                save_ema_checkpoint(
+                    checkpoint_path=run_checkpoint_dir / "ddpm_ema.pt",
+                    ema_model=ema_model,
+                    optimizer=optimizer,
+                    epoch=epoch,
+                    config=config,
+                    timesteps=diffusion_timesteps,
+                    ema_decay=ema_decay,
+                )
+                try:
+                    shutil.copy2(run_checkpoint_dir / "ddpm_ema.pt", base_checkpoint_dir / "ddpm_ema.pt")
+                except Exception:
+                    pass
             print(f"Saved checkpoint: {checkpoint_path}")
 
         if global_step >= train_steps:
@@ -413,17 +448,14 @@ def main() -> None:
             except Exception:
                 pass
             if ema_model is not None:
-                torch.save(
-                    {
-                        "epoch": epoch,
-                        "model_state_dict": ema_model.state_dict(),
-                        "optimizer_state_dict": optimizer.state_dict(),
-                        "config": config,
-                        "timesteps": diffusion_timesteps,
-                        "ema": True,
-                        "ema_decay": ema_decay,
-                    },
-                    run_checkpoint_dir / "ddpm_ema.pt",
+                save_ema_checkpoint(
+                    checkpoint_path=run_checkpoint_dir / "ddpm_ema.pt",
+                    ema_model=ema_model,
+                    optimizer=optimizer,
+                    epoch=epoch,
+                    config=config,
+                    timesteps=diffusion_timesteps,
+                    ema_decay=ema_decay,
                 )
                 try:
                     shutil.copy2(run_checkpoint_dir / "ddpm_ema.pt", base_checkpoint_dir / "ddpm_ema.pt")

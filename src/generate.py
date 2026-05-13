@@ -145,8 +145,8 @@ def main() -> None:
         checkpoint_path = resolve_project_path(args.checkpoint)
     else:
         candidate_paths = [
-            checkpoint_dir / "ddpm_best.pt",
             checkpoint_dir / "ddpm_ema.pt",
+            checkpoint_dir / "ddpm_best.pt",
             checkpoint_dir / "ddpm_latest.pt",
         ]
         checkpoint_path = next((path for path in candidate_paths if path.is_file()), candidate_paths[-1])
