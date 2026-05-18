@@ -1,0 +1,26 @@
+base_model: ./sd15
+data_dir: ./data/meteorite
+output_dir: ./lora_weights
+lora_rank: 16
+resolution: 512
+train_batch_size: 2
+gradient_accumulation_steps: 2
+train_unet: true
+train_text_encoder: false
+train_lr_unet: 1e-4
+train_lr_text: 0.0
+optimizer: AdamW
+max_train_steps: 2000
+mixed_precision: fp16
+save_every_steps: 200
+seed: 42
+caption_field: caption
+trigger_token: metrock
+caption_default: metrock meteorite on a white background
+caption_templates:
+  - metrock meteorite on a white background
+  - metrock dark brown meteorite on a white background
+  - metrock grey rocky meteorite on a white background
+  - metrock metallic grey meteorite on a white background
+  - metrock pitted surface meteorite on a white background
+  - metrock irregular shape meteorite on a white background

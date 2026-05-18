@@ -6,11 +6,11 @@ evaluation_dir: evaluation_results
 checkpoint_dir: checkpoints
 
 model: ddpm
-image_size: 128
+image_size: 256
 base_channels: 128
 
 batch_size: 32
-num_workers: 8
+num_workers: 2
 epochs: 1000
 train_steps: 100000
 checkpoint_every_steps: 10000
@@ -18,17 +18,19 @@ lr: 0.0001
 optimizer: AdamW
 grad_clip: 1.0
 
-beta_schedule: linear
+beta_schedule: cosine
 timesteps: 1000
 
-augment: none
-crop_foreground: true
+augment:
+  horizontal_flip: true
+  random_rotation: 10
+  random_scale: [0.9, 1.1]
+crop_foreground: false
 pretrain: false
 ema: true
 ema_decay: 0.9999
-ema_update_every: 5
 
-sampling_method: ddpm 
+sampling_method: ddpm
 sampling_steps: 1000
 
 seed: 42

@@ -1,119 +1,45 @@
-# Assignment3
+# Meteorite Image Generation
 
-This project is organized around three parts:
+This project explores meteorite image generation using diffusion-based generative models.  
+The goal is to train a model on the provided meteorite dataset and generate new meteorite images with a clean white background.
 
-- `data/meteorite/`: training reference images
-- `generated_pictures/`: generated samples for FID evaluation
-- `evaluation_results/`: FID outputs and metrics
+![Generated Meteorite Examples](generated_Meteorite_examples.png)
 
-## Structure
+## Overview
 
-- `src/train.py`: training entrypoint scaffold
-- `src/generate.py`: image generation entrypoint scaffold
-- `src/dataset.py`: image dataset helper
-- `src/model.py`: starter generator/discriminator modules
-- `src/utils.py`: shared path and utility helpers
-- `src/make_grid.py`: preview grid generator
-- `configs/train_config.yaml`: default config template
-- `evaluate_fid.py`: FID evaluation script
+The main approach is based on a **Denoising Diffusion Probabilistic Model (DDPM)** trained from scratch.  
+A U-Net style denoising network is used to gradually recover meteorite images from Gaussian noise.
 
-## Usage
+To improve the generation quality, the pipeline applies **foreground cropping** to reduce the effect of large white background regions, uses **EMA checkpoints** for more stable sampling, and generates images with a **1000-step DDPM sampling process**.
 
-Evaluate FID after generating images into `generated_pictures/`:
+## Tried Methods
 
-```bash
-cd /root/liaomiaoyi/Assignment3
-python -m src.train --config /root/liaomiaoyi/Assignment3/configs/train_config_contour_first.yaml
-```
+Several methods and variants were tested during the project:
 
-```bash
-  python -m src.generate   --config /root/liaomiaoyi/Assignment3/configs/train_config_contour_first.yaml   --checkpoint /root/liaomiaoyi/Assignment3/checkpoints/meteorite_contour_first_20260513_140332_seed42/ddpm_step_0020000.pt
-```
+- **Baseline DDPM**  
+  A smaller DDPM model trained at lower resolution. It could learn rough meteorite shapes, but the generated images were blurry and lacked realistic texture.
 
-```bash
-python evaluate_fid.py
-```
+- **Improved DDPM**  
+  The main and best-performing method. It uses 128×128 images, a larger U-Net, AdamW optimizer, foreground cropping, EMA checkpoints, and 1000-step sampling.
 
-Create a quick preview grid from the dataset:
+- **256×256 DDPM**  
+  A higher-resolution DDPM experiment. Although it increased image size, training became more difficult and the white background dominated the data distribution when foreground cropping was disabled.
 
-```bash
-python -m src.make_grid --image-dir data/meteorite --output generated_pictures/grid_preview.png
-```
+- **DDPM with Bottleneck Attention**  
+  A self-attention module was added at the bottleneck of the U-Net to improve global structure modeling, but it did not outperform the improved DDPM setting.
 
-The training and generation scripts are provided as scaffolds so the project has a complete, navigable layout.
+- **Stable Diffusion 1.5 with LoRA Fine-tuning**  
+  A LoRA fine-tuning branch was also explored. It generated more realistic rock-like textures, but the background was harder to control and sometimes included shadows, gray backgrounds, or non-white scenes.
 
-## Experiments
+## Final Choice
 
-### Experiment 1: Baseline DDPM
-- `image_size`: 64
-- `base_channels`: 64
-- `batch_size`: 32
-- `lr`: 2e-4
-- `optimizer`: Adam
+The final selected model is the **improved DDPM** with:
 
-- `epochs`: 1000
-- `train_steps`: 50000
-- `checkpoint_every_steps`: 5000
-- `grad_clip`: 1.0
+- 128×128 image resolution
+- U-Net denoising network
+- foreground cropping
+- AdamW optimizer
+- EMA checkpointing
+- 1000-step DDPM sampling
 
-- `augment`: none
-- `1crop_foreground`: true
-- `pretrain`: false
-- `sampling_steps`: 1000
-
-Purpose:
-
-- Baseline comparison.
-- Check whether generated images look like meteorites.
-- Record FID.
-
-
-**情况 A：结果好，覆盖并上传**
-直接提交并推送。
-
-Bash
-    git add .
-    git commit -m "feat: 快速实验成功"
-    git push origin main
-    ```
-
-**情况 B：结果差，拉取回实验前的状态**
-    直接清空所有未提交的修改，恢复到最后一次 commit 的状态。
-    
-```bash
-    # 丢弃所有已跟踪文件的修改
-    git restore .  
-    # （或者使用老版本 Git 的命令：git reset --hard HEAD）
-
-    # 删除所有未跟踪的新文件（如实验中产生的临时文件、新脚本等）
-    # -f 表示强制，-d 表示包含目录
-    git clean -fd
-    ```
-
-
-### 总结建议
-*   **如果是长达几天、需要反复修改的实验：** 绝对使用 **方法一（分支）**。
-*   **如果是只需几分钟、改几个参数的快速试错：** 可以使用 **方法二（重置）**。
-
-## 结果
-20000 checkpoint
-243.78895828877688
-
-
-### Experiment 2:
-- `image_size`: 128
-- `base_channels`: 128
-- `batch_size`: 32
-- `lr`: 1e-4
-- `optimizer`: AdamW
-
-- `epochs`: 1000
-- `train_steps`: 100000
-- `checkpoint_every_steps`: 5000
-- `grad_clip`: 1.0
-
-- `augment`: none
-- `1crop_foreground`: true
-- `pretrain`: false
-- `sampling_steps`: 1000
-- `use_EMA`: true
+This setup produced the most stable white-background meteorite images among the tested methods and achieved the best FID score in the experiments.

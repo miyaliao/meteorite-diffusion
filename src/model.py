@@ -97,8 +97,44 @@ class ConvBlock(nn.Module):
         return self.block(x)
 
 
+class SelfAttention2d(nn.Module):
+    def __init__(self, channels: int) -> None:
+        super().__init__()
+        groups = 32 if channels >= 32 and channels % 32 == 0 else 8
+        self.norm = nn.GroupNorm(groups, channels)
+        self.qkv = nn.Conv2d(channels, channels * 3, 1)
+        self.proj = nn.Conv2d(channels, channels, 1)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        b, c, h, w = x.shape
+        residual = x
+
+        x = self.norm(x)
+        qkv = self.qkv(x)
+        q, k, v = qkv.chunk(3, dim=1)
+
+        q = q.reshape(b, c, h * w).transpose(1, 2)  # (b, hw, c)
+        k = k.reshape(b, c, h * w)  # (b, c, hw)
+        v = v.reshape(b, c, h * w).transpose(1, 2)  # (b, hw, c)
+
+        attn = torch.bmm(q, k) * (c ** -0.5)
+        attn = torch.softmax(attn, dim=-1)
+
+        out = torch.bmm(attn, v)  # (b, hw, c)
+        out = out.transpose(1, 2).reshape(b, c, h, w)
+        out = self.proj(out)
+
+        return residual + out
+
+
 class DDPMDenoiser(nn.Module):
-    def __init__(self, image_channels: int = 3, base_channels: int = 64, time_embed_dim: int = 256) -> None:
+    def __init__(
+        self,
+        image_channels: int = 3,
+        base_channels: int = 64,
+        time_embed_dim: int = 256,
+        use_attention: bool = True,
+    ) -> None:
         super().__init__()
         self.time_embed = nn.Sequential(
             SinusoidalTimeEmbedding(time_embed_dim),
@@ -113,6 +149,12 @@ class DDPMDenoiser(nn.Module):
         self.down2 = ConvBlock(base_channels * 2, base_channels * 2)
         self.downsample2 = nn.Conv2d(base_channels * 2, base_channels * 4, kernel_size=4, stride=2, padding=1)
         self.mid = ConvBlock(base_channels * 4, base_channels * 4)
+        self.use_attention = use_attention
+        if use_attention:
+            # Bottleneck attention (optional small self-attention at lowest resolution)
+            self.attn_mid = SelfAttention2d(base_channels * 4)
+        else:
+            self.attn_mid = nn.Identity()
 
         self.upsample1 = nn.ConvTranspose2d(base_channels * 4, base_channels * 2, kernel_size=4, stride=2, padding=1)
         self.up1 = ConvBlock(base_channels * 4, base_channels * 2)
@@ -137,6 +179,8 @@ class DDPMDenoiser(nn.Module):
 
         x2 = self.downsample2(d2)
         mid = self.mid(x2 + self.t_proj_mid(time_emb).unsqueeze(-1).unsqueeze(-1))
+        # apply attention at bottleneck
+        mid = self.attn_mid(mid)
 
         u1 = self.upsample1(mid)
         u1 = torch.cat((u1, d2), dim=1)
@@ -151,5 +195,17 @@ class DDPMDenoiser(nn.Module):
         return self.out_conv(u2)
 
 
-def build_ddpm_denoiser(image_channels: int = 3, base_channels: int = 64) -> DDPMDenoiser:
-    return DDPMDenoiser(image_channels=image_channels, base_channels=base_channels)
+def build_ddpm_denoiser(
+    image_channels: int = 3,
+    base_channels: int = 64,
+    use_attention: bool = True,
+) -> DDPMDenoiser:
+    return DDPMDenoiser(
+        image_channels=image_channels,
+        base_channels=base_channels,
+        use_attention=use_attention,
+    )
+
+
+def checkpoint_uses_attention(state_dict: dict[str, torch.Tensor]) -> bool:
+    return any(key.startswith("attn_mid.") for key in state_dict)

@@ -8,7 +8,7 @@ import torch
 from PIL import Image
 from tqdm import tqdm
 
-from .model import build_ddpm_denoiser
+from .model import build_ddpm_denoiser, checkpoint_uses_attention
 from .utils import GENERATED_DIR, ensure_dir, load_yaml, resolve_project_path
 
 
@@ -130,7 +130,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, default=GENERATED_DIR)
     parser.add_argument("--checkpoint", type=Path, default=None)
     parser.add_argument("--num-samples", type=int, default=1000)
-    parser.add_argument("--sample-batch-size", type=int, default=16)
+    parser.add_argument("--sample-batch-size", type=int, default=32)
     parser.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto")
     return parser.parse_args()
 
@@ -174,14 +174,17 @@ def main() -> None:
     else:
         betas = make_beta_schedule(timesteps).to(device)
 
-    model = build_ddpm_denoiser(image_channels=3, base_channels=base_channels).to(device)
-    model.load_state_dict(checkpoint["model_state_dict"])
+    model_state_dict = checkpoint["model_state_dict"]
+    use_attention = checkpoint_uses_attention(model_state_dict)
+    model = build_ddpm_denoiser(image_channels=3, base_channels=base_channels, use_attention=use_attention).to(device)
+    model.load_state_dict(model_state_dict)
     model.eval()
 
     print("DDPM generation started")
     print(f"Config: {args.config}")
     print(f"Checkpoint: {checkpoint_path}")
     print(f"Checkpoint config: {checkpoint_config.get('project_name', 'unknown')}")
+    print(f"Model attention: {use_attention}")
     print(f"Device: {device}")
     print(f"Output dir: {output_dir}")
     print(
@@ -192,33 +195,35 @@ def main() -> None:
 
     generated = 0
     batch_index = 0
-    while generated < args.num_samples:
-        current_batch = min(args.sample_batch_size, args.num_samples - generated)
-        if sampling_method == "ddim":
-            samples = sample_ddim(
-                model=model,
-                batch_size=current_batch,
-                image_size=image_size,
-                betas=betas,
-                num_inference_steps=min(sampling_steps, timesteps),
-                device=device,
-                eta=0.0,
-            )
-        else:
-            samples = sample_ddpm(
-                model=model,
-                batch_size=current_batch,
-                image_size=image_size,
-                betas=betas,
-                device=device,
-            )
+    with tqdm(total=args.num_samples, desc="Generating", unit="img") as progress:
+        while generated < args.num_samples:
+            current_batch = min(args.sample_batch_size, args.num_samples - generated)
+            if sampling_method == "ddim":
+                samples = sample_ddim(
+                    model=model,
+                    batch_size=current_batch,
+                    image_size=image_size,
+                    betas=betas,
+                    num_inference_steps=min(sampling_steps, timesteps),
+                    device=device,
+                    eta=0.0,
+                )
+            else:
+                samples = sample_ddpm(
+                    model=model,
+                    batch_size=current_batch,
+                    image_size=image_size,
+                    betas=betas,
+                    device=device,
+                )
 
-        for i in tqdm(range(current_batch), desc=f"Saving batch {batch_index}", leave=False):
-            image = to_pil_image(samples[i])
-            image.save(output_dir / f"sample_{generated + i:06d}.png")
+            for i in tqdm(range(current_batch), desc=f"Saving batch {batch_index}", leave=False):
+                image = to_pil_image(samples[i])
+                image.save(output_dir / f"sample_{generated + i:06d}.png")
 
-        generated += current_batch
-        batch_index += 1
+            generated += current_batch
+            batch_index += 1
+            progress.update(current_batch)
 
     print(f"Generation finished: {generated} images saved to {output_dir}")
 

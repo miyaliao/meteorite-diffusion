@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import copy
 import math
+import re
 from pathlib import Path
 
 import torch
@@ -17,7 +18,7 @@ import shutil
 import json
 
 from .dataset import MeteoriteImageDataset
-from .model import build_ddpm_denoiser
+from .model import build_ddpm_denoiser, checkpoint_uses_attention
 from .utils import DATA_DIR, EVAL_DIR, GENERATED_DIR, METEORITE_DIR, ensure_dir, load_yaml, resolve_project_path, set_seed
 
 
@@ -127,6 +128,7 @@ def save_checkpoint(
     model: nn.Module,
     optimizer: Adam,
     epoch: int,
+    global_step: int,
     config: dict,
     timesteps: int,
 ) -> None:
@@ -134,6 +136,7 @@ def save_checkpoint(
     torch.save(
         {
             "epoch": epoch,
+            "global_step": global_step,
             "model_state_dict": model.state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
             "config": config,
@@ -148,6 +151,7 @@ def save_ema_checkpoint(
     ema_model: "EMAModel",
     optimizer: Adam,
     epoch: int,
+    global_step: int,
     config: dict,
     timesteps: int,
     ema_decay: float,
@@ -156,6 +160,7 @@ def save_ema_checkpoint(
     torch.save(
         {
             "epoch": epoch,
+            "global_step": global_step,
             "model_state_dict": ema_model.state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
             "config": config,
@@ -165,6 +170,13 @@ def save_ema_checkpoint(
         },
         checkpoint_path,
     )
+
+
+def infer_step_from_checkpoint_path(checkpoint_path: Path) -> int | None:
+    match = re.search(r"step_(\d+)", checkpoint_path.stem)
+    if match is None:
+        return None
+    return int(match.group(1))
 
 
 class EMAModel:
@@ -251,6 +263,10 @@ def main() -> None:
     beta_schedule = str(config.get("beta_schedule", "linear")).lower()
     ema_enabled = bool(config.get("ema", False))
     ema_decay = float(config.get("ema_decay", 0.9999))
+    init_checkpoint_value = config.get("init_checkpoint")
+    init_checkpoint = resolve_project_path(init_checkpoint_value) if init_checkpoint_value else None
+    resume_optimizer = bool(config.get("resume_optimizer", False))
+    resume_training = bool(config.get("resume_training", True))
 
     transform = build_transform(image_size=image_size, augment=augment)
     dataset = MeteoriteImageDataset(
@@ -277,12 +293,59 @@ def main() -> None:
         epochs = min_required_epochs
 
     model = build_ddpm_denoiser(image_channels=3, base_channels=base_channels).to(device)
+    if device.type == "cuda":
+        torch.backends.cudnn.benchmark = True
+        torch.set_float32_matmul_precision("high")
+        model = model.to(memory_format=torch.channels_last)
     if optimizer_name == "adamw":
         optimizer = AdamW(model.parameters(), lr=lr, betas=(adam_beta1, adam_beta2), weight_decay=weight_decay)
     else:
         optimizer = Adam(model.parameters(), lr=lr, betas=(adam_beta1, adam_beta2), weight_decay=weight_decay)
 
+    loaded_checkpoint_epoch = None
+    loaded_checkpoint_global_step = None
+    if init_checkpoint is not None:
+        if not init_checkpoint.is_file():
+            raise FileNotFoundError(f"Init checkpoint not found: {init_checkpoint}")
+        init_checkpoint_data = torch.load(init_checkpoint, map_location=device)
+        if not isinstance(init_checkpoint_data, dict) or "model_state_dict" not in init_checkpoint_data:
+            raise ValueError(f"Invalid init checkpoint: {init_checkpoint}")
+        init_model_state_dict = init_checkpoint_data["model_state_dict"]
+        init_uses_attention = checkpoint_uses_attention(init_model_state_dict)
+        if init_uses_attention != getattr(model, "use_attention", True):
+            model = build_ddpm_denoiser(
+                image_channels=3,
+                base_channels=base_channels,
+                use_attention=init_uses_attention,
+            ).to(device)
+            if device.type == "cuda":
+                model = model.to(memory_format=torch.channels_last)
+        model.load_state_dict(init_model_state_dict)
+        if resume_optimizer and "optimizer_state_dict" in init_checkpoint_data:
+            optimizer.load_state_dict(init_checkpoint_data["optimizer_state_dict"])
+        loaded_checkpoint_epoch = int(init_checkpoint_data.get("epoch", 0))
+        loaded_checkpoint_global_step = init_checkpoint_data.get("global_step")
+        print(f"Loaded init checkpoint: {init_checkpoint} (resume_optimizer={resume_optimizer})")
+
+    start_epoch = 1
+    global_step = 0
+    if resume_training and init_checkpoint is not None and loaded_checkpoint_epoch is not None:
+        start_epoch = loaded_checkpoint_epoch + 1
+        if loaded_checkpoint_global_step is not None:
+            global_step = int(loaded_checkpoint_global_step)
+        else:
+            inferred_step = infer_step_from_checkpoint_path(init_checkpoint)
+            if inferred_step is not None:
+                global_step = inferred_step
+            else:
+                global_step = loaded_checkpoint_epoch * max(len(loader), 1)
+        print(f"Resuming training from epoch={start_epoch}, global_step={global_step}")
+
     ema_model = EMAModel(model, ema_decay) if ema_enabled else None
+    ema_update_every = max(int(config.get("ema_update_every", 5)), 1)
+    use_amp = device.type == "cuda"
+    amp_dtype = torch.bfloat16 if use_amp and torch.cuda.is_bf16_supported() else torch.float16
+    scaler = torch.amp.GradScaler("cuda", enabled=use_amp and amp_dtype == torch.float16)
 
     if beta_schedule == "cosine":
         betas = make_cosine_beta_schedule(diffusion_timesteps).to(device)
@@ -326,29 +389,40 @@ def main() -> None:
     print(f"Train steps: {train_steps}, Optimizer: {optimizer_name}, Beta schedule: {beta_schedule}")
     print(f"Checkpoint every steps: {checkpoint_every_steps}")
     print(f"Pretrain: {pretrain}, Crop foreground: {crop_foreground}")
-    print(f"Grad clip: {grad_clip}, EMA: {ema_enabled} (decay={ema_decay})")
+    print(f"Grad clip: {grad_clip}, EMA: {ema_enabled} (decay={ema_decay}, update_every={ema_update_every})")
+    print(f"AMP enabled: {use_amp} (dtype={amp_dtype})")
     if "early_stopping_patience" in config or "early_stopping_min_delta" in config:
         print("Early stopping is disabled; training will stop only at train_steps or epoch limit.")
 
-    global_step = 0
-    for epoch in range(1, epochs + 1):
+    for epoch in range(start_epoch, epochs + 1):
         model.train()
         epoch_loss = 0.0
         progress = tqdm(loader, desc=f"Epoch {epoch}/{epochs}")
 
         for images, _ in progress:
             images = images.to(device, non_blocking=True)
+            if device.type == "cuda":
+                images = images.to(memory_format=torch.channels_last)
             timesteps = torch.randint(0, diffusion_timesteps, (images.size(0),), device=device)
-            noisy_images, noise = q_sample(images, timesteps, sqrt_alpha_bar, sqrt_one_minus_alpha_bar)
-
-            predicted_noise = model(noisy_images, timesteps)
-            loss = F.mse_loss(predicted_noise, noise)
+            with torch.autocast(device_type="cuda", dtype=amp_dtype, enabled=use_amp):
+                noisy_images, noise = q_sample(images, timesteps, sqrt_alpha_bar, sqrt_one_minus_alpha_bar)
+                predicted_noise = model(noisy_images, timesteps)
+                loss = F.mse_loss(predicted_noise, noise)
 
             optimizer.zero_grad(set_to_none=True)
-            loss.backward()
-            nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip)
-            optimizer.step()
-            if ema_model is not None:
+            if scaler.is_enabled():
+                scaler.scale(loss).backward()
+                scaler.unscale_(optimizer)
+                if grad_clip > 0:
+                    nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip)
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                loss.backward()
+                if grad_clip > 0:
+                    nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip)
+                optimizer.step()
+            if ema_model is not None and global_step % ema_update_every == 0:
                 ema_model.update(model)
 
             global_step += 1
@@ -361,6 +435,7 @@ def main() -> None:
                     model=model,
                     optimizer=optimizer,
                     epoch=epoch,
+                    global_step=global_step,
                     config=config,
                     timesteps=diffusion_timesteps,
                 )
@@ -369,6 +444,7 @@ def main() -> None:
                     model=model,
                     optimizer=optimizer,
                     epoch=epoch,
+                    global_step=global_step,
                     config=config,
                     timesteps=diffusion_timesteps,
                 )
@@ -382,6 +458,7 @@ def main() -> None:
                         ema_model=ema_model,
                         optimizer=optimizer,
                         epoch=epoch,
+                        global_step=global_step,
                         config=config,
                         timesteps=diffusion_timesteps,
                         ema_decay=ema_decay,
@@ -401,6 +478,7 @@ def main() -> None:
                 model=model,
                 optimizer=optimizer,
                 epoch=epoch,
+                global_step=global_step,
                 config=config,
                 timesteps=diffusion_timesteps,
             )
@@ -410,6 +488,7 @@ def main() -> None:
                 model=model,
                 optimizer=optimizer,
                 epoch=epoch,
+                global_step=global_step,
                 config=config,
                 timesteps=diffusion_timesteps,
             )
@@ -424,6 +503,7 @@ def main() -> None:
                     ema_model=ema_model,
                     optimizer=optimizer,
                     epoch=epoch,
+                    global_step=global_step,
                     config=config,
                     timesteps=diffusion_timesteps,
                     ema_decay=ema_decay,
@@ -440,6 +520,7 @@ def main() -> None:
                 model=model,
                 optimizer=optimizer,
                 epoch=epoch,
+                global_step=global_step,
                 config=config,
                 timesteps=diffusion_timesteps,
             )
@@ -453,6 +534,7 @@ def main() -> None:
                     ema_model=ema_model,
                     optimizer=optimizer,
                     epoch=epoch,
+                    global_step=global_step,
                     config=config,
                     timesteps=diffusion_timesteps,
                     ema_decay=ema_decay,

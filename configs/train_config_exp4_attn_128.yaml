@@ -1,4 +1,4 @@
-project_name: meteorite_contour_first
+project_name: meteorite_ddpm_attn_128
 
 data_root: data/meteorite
 generated_dir: generated_pictures
@@ -21,14 +21,20 @@ grad_clip: 1.0
 beta_schedule: linear
 timesteps: 1000
 
-augment: none
+augment:
+  horizontal_flip: true
+  random_rotation: 5
+
 crop_foreground: true
+crop_margin_mode: random
+crop_margin_range: [0.12, 0.22]
+
 pretrain: false
 ema: true
 ema_decay: 0.9999
 ema_update_every: 5
 
-sampling_method: ddpm 
+sampling_method: ddpm
 sampling_steps: 1000
 
 seed: 42

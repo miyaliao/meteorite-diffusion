@@ -1,0 +1,41 @@
+project_name: meteorite_ddpm_256_resume
+
+data_root: data/meteorite
+generated_dir: generated_pictures
+evaluation_dir: evaluation_results
+checkpoint_dir: checkpoints
+
+model: ddpm
+image_size: 256
+base_channels: 128
+
+batch_size: 16
+num_workers: 8
+epochs: 1000
+train_steps: 220000
+checkpoint_every_steps: 10000
+lr: 0.00005
+optimizer: AdamW
+grad_clip: 1.0
+
+beta_schedule: cosine
+timesteps: 1000
+
+augment:
+  horizontal_flip: true
+  random_rotation: 10
+
+crop_foreground: true
+pretrain: false
+ema: true
+ema_decay: 0.9999
+ema_update_every: 5
+
+sampling_method: ddim
+sampling_steps: 1000
+
+init_checkpoint: /root/liaomiaoyi/Assignment3/checkpoints/meteorite_ddpm_256_resume_20260515_202203_seed42/ddpm_latest.pt
+resume_optimizer: true
+resume_training: true
+
+seed: 42
